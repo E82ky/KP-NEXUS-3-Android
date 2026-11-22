@@ -1,0 +1,217 @@
+
+name: KP NEXUS 2 APK bauen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository laden
+        uses: actions/checkout@v5
+
+      - name: Java 17 einrichten
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK einrichten
+        uses: android-actions/setup-android@v3
+
+      - name: Android SDK Pakete installieren
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Gradle einrichten
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Android-Projekt erstellen
+        shell: bash
+        run: |
+          test -f "index.html"
+          test -f "Launch Sequence.mp3"
+
+          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/java/de/kiansphotography/kpnexus
+
+          cp index.html app/src/main/assets/index.html
+          cp "Launch Sequence.mp3" app/src/main/assets/intro.mp3
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/assets/index.html")
+          s = p.read_text(encoding="utf-8")
+          audio = '<audio id="kpnIntroMusic" src="intro.mp3" preload="auto"></audio>'
+          if 'id="kpnIntroMusic"' not in s:
+              s = s.replace("</body>", audio + "\n</body>", 1)
+          script = """
+          <script>
+          document.addEventListener('DOMContentLoaded', function() {
+            const audio = document.getElementById('kpnIntroMusic');
+            const start = Array.from(document.querySelectorAll('button'))
+              .find(b => b.textContent.toUpperCase().includes('STARTEN'));
+            if (audio && start) {
+              start.addEventListener('click', function() {
+                audio.volume = 0.82;
+                audio.play().catch(console.warn);
+              });
+            }
+            const login = document.getElementById('loginScreen');
+            if (audio && login) {
+              new MutationObserver(() => {
+                const visible = getComputedStyle(login).display !== 'none'
+                  && getComputedStyle(login).visibility !== 'hidden';
+                if (visible && !audio.paused) {
+                  let v = audio.volume;
+                  const timer = setInterval(() => {
+                    v = Math.max(0, v - 0.08);
+                    audio.volume = v;
+                    if (v <= 0) {
+                      clearInterval(timer);
+                      audio.pause();
+                      audio.currentTime = 0;
+                    }
+                  }, 120);
+                }
+              }).observe(login, {attributes:true, attributeFilter:['style','class']});
+            }
+          });
+          </script>
+          """
+          if '</body>' in s and 'kpnIntroMusic' in s and 'MutationObserver' not in s:
+              s = s.replace('</body>', script + '\n</body>', 1)
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "KP-NEXUS-2"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'de.kiansphotography.kpnexus'
+              compileSdk 35
+              defaultConfig {
+                  applicationId 'de.kiansphotography.kpnexus'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.12.1'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:label="KP NEXUS 2"
+                  android:usesCleartextTraffic="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/de/kiansphotography/kpnexus/MainActivity.java <<'EOF'
+          package de.kiansphotography.kpnexus;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebResourceRequest;
+          import androidx.webkit.WebViewAssetLoader;
+          import androidx.webkit.WebViewClientCompat;
+
+          public class MainActivity extends Activity {
+              private WebView webView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  webView = new WebView(this);
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setMediaPlaybackRequiresUserGesture(true);
+
+                  WebViewAssetLoader loader = new WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                      .build();
+
+                  webView.setWebViewClient(new WebViewClientCompat() {
+                      @Override
+                      public android.webkit.WebResourceResponse shouldInterceptRequest(
+                          WebView view, WebResourceRequest request) {
+                          return loader.shouldInterceptRequest(request.getUrl());
+                      }
+                  });
+                  webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) webView.goBack();
+                  else super.onBackPressed();
+              }
+          }
+          EOF
+
+      - name: APK bauen
+        run: gradle --no-daemon assembleDebug
+
+      - name: APK bereitstellen
+        uses: actions/upload-artifact@v4
+        with:
+          name: KP-NEXUS-2-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
